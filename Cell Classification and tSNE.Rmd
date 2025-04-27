@@ -1,0 +1,333 @@
+---
+title: "Cell Classification and tSNE"
+author: "Shiva Ayyar"
+date: "2025-04-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r Loading Counts}
+
+countsFile <- read.delim("gene_id2.counts", header = FALSE)
+
+countsDF <- as.data.frame(countsFile)
+
+colnames(countsDF) <- countsDF[2,]
+
+countsDF <- countsDF[3:nrow(countsDF),]
+
+rownames(countsDF) <- countsDF[,1] 
+
+countsDF <- countsDF[,7:ncol(countsDF)]
+
+colnames(countsDF) <- sub("/mnt/personal/wilson/star_aligned_65/","", colnames(countsDF))
+
+colnames(countsDF) <- sub("_Aligned.sortedByCoord.out.bam","", colnames(countsDF))
+
+rm(countsFile)
+
+
+# Filters the counts matrix into just a Ensemble ID vs SRR ID
+```
+
+
+``` {r Making Seurat object and Normalization}
+
+library(Seurat)
+library(dplyr)
+
+CountsSeuratObject <- CreateSeuratObject(counts = countsDF, project = "AlignmentCounts")
+
+CountsSeuratObject <- NormalizeData(CountsSeuratObject)
+
+CountsSeuratObject <- ScaleData(CountsSeuratObject)
+
+
+```
+
+``` {r Making marker gene List and Scoring}
+
+# Loads Marker gene lists
+sheetsList <- readxl::excel_sheets("mmc2.xlsx")
+
+GeneralCellMarkers <- readxl::read_xlsx("mmc2.xlsx", sheet = sheetsList[2])
+
+library(ensembldb)
+library(org.Hs.eg.db)
+
+symbol2Ensembl <- function(x) {
+  ensembldb::select(org.Hs.eg.db, keys = x, keytype = "SYMBOL", columns = c("SYMBOL", "ENSEMBL"))$ENSEMBL[1]
+}
+
+GeneralCellMarkers$EnsemblID <- mapply(symbol2Ensembl, GeneralCellMarkers$Gene)
+
+GeneralCellMarkersList <- split(GeneralCellMarkers$EnsemblID, GeneralCellMarkers$`Cell Type`)
+
+CountsSeuratObject <- AddModuleScore(object = CountsSeuratObject, features = GeneralCellMarkersList, name = "GeneralCellType")
+
+findLikelyType <- function(x) {
+  
+  names(GeneralCellMarkersList)[which.max(x)]
+  
+}
+
+CellTypes <- apply(CountsSeuratObject@meta.data[grep("GeneralCellType", colnames(CountsSeuratObject@meta.data))], 1, findLikelyType)
+
+CellTypesMatrix <- as.data.frame(1:length(CountsSeuratObject@meta.data$nFeature_RNA))
+
+CellTypesMatrix$CellID <- names(CellTypes)
+
+CellTypesMatrix$CellType <- CellTypes
+
+CellTypesMatrix$`1:615` <- NULL
+
+# Creates csv with cell classifications
+write.csv(CellTypesMatrix, "GeneralCellTypesSRRs.csv")
+
+rm(CellTypes, GeneralCellMarkers, GeneralCellMarkersList, sheetsList)
+
+
+git config --global user.email "you@example.com"
+  git config --global user.name "Your Name"
+```
+
+``` {r Seurat integration Workflow}
+library(SCINA)
+# source("seurat_helpers_functions.R")
+
+VlnPlot(CountsSeuratObject, features = "nCount_RNA")
+
+
+plot(CountsSeuratObject@meta.data$GeneralCellType1, CountsSeuratObject@meta.data$GeneralCellType2)
+
+
+
+```
+
+``` {r tSNE}
+
+set.seed(33)
+
+CountsSeuratObject <- FindVariableFeatures(CountsSeuratObject, nfeatures = 2000)
+
+CountsSeuratObject <- RunPCA(CountsSeuratObject, features = VariableFeatures(CountsSeuratObject))
+
+
+
+CountsSeuratObject <- RunTSNE(
+  CountsSeuratObject, perplexity = 20,
+  dims = 1:15,
+  seed.use = 33
+  )
+
+CountsSeuratObject$CellType <- CellTypesMatrix$CellType
+
+DimPlot(CountsSeuratObject, reduction = "tsne", group.by = "CellType")
+
+# Endothelial cells are stromal, fibroblasts are stromal
+# hpatocytes are epithelial
+# melanocytes are neither
+
+CellTypesMatrix$BroaderCellTypes <- sub("Fibroblasts", "Stromal", sub("Hepatocytes", "Epithelial", sub("Endothelial", "Stromal", CellTypesMatrix$CellType)))
+
+CountsSeuratObject$BroaderCellType <- CellTypesMatrix$BroaderCellTypes
+
+DimPlot(CountsSeuratObject, reduction = "tsne", group.by = "BroaderCellType")
+
+
+```
+
+``` {r UMAPing} 
+
+CountsSeuratObject <- RunUMAP(CountsSeuratObject, dims = 1:15)
+Seurat::DimPlot(CountsSeuratObject, reduction = "umap", group.by = "CellType")
+
+
+```
+
+
+``` {r Isolating Immune cells}
+
+library(Seurat)
+
+ImmuneSeuratObject <- subset(CountsSeuratObject, subset = CellType == "Immune Cells")
+
+table(CountsSeuratObject$BroaderCellType)
+
+```
+``` {r Making marker gene List and Scoring}
+
+
+sheetsList <- readxl::excel_sheets("mmc2.xlsx")
+
+ImmuneCellMarkers <- readxl::read_xlsx("mmc2.xlsx", sheet = sheetsList[5])
+
+# have to remove housekeeping genes
+ImmuneCellMarkers <- ImmuneCellMarkers[ImmuneCellMarkers$`Cell Type` != "Housekeeping",]
+
+library(ensembldb)
+library(org.Hs.eg.db)
+
+symbol2Ensembl <- function(x) {
+  ensembldb::select(org.Hs.eg.db, keys = x, keytype = "SYMBOL", columns = c("SYMBOL", "ENSEMBL"))$ENSEMBL[1]
+}
+
+ImmuneCellMarkers$EnsemblID <- mapply(symbol2Ensembl, ImmuneCellMarkers$Gene)
+
+ImmuneCellMarkersList <- split(ImmuneCellMarkers$EnsemblID, ImmuneCellMarkers$`Cell Type`)
+
+ImmuneSeuratObject <- AddModuleScore(object = ImmuneSeuratObject, features = ImmuneCellMarkersList, name = "ImmuneCellType")
+
+findLikelyType <- function(x) {
+  
+  names(ImmuneCellMarkersList)[which.max(x)]
+  
+}
+
+ImmuneCellTypes <- apply(ImmuneSeuratObject@meta.data[grep("ImmuneCellType", colnames(ImmuneSeuratObject@meta.data))], 1, findLikelyType)
+
+ImmuneCellTypesMatrix <- as.data.frame(1:length(ImmuneSeuratObject@meta.data$nFeature_RNA))
+
+ImmuneCellTypesMatrix$CellID <- names(ImmuneCellTypes)
+
+ImmuneCellTypesMatrix$CellType <- ImmuneCellTypes
+
+ImmuneCellTypesMatrix$`1:615` <- NULL
+
+write.csv(ImmuneCellTypesMatrix, "ImmuneCellTypesSRRs.csv")
+
+#rm(ImmuneCellTypes, ImmuneCellMarkers, ImmuneCellMarkersList, sheetsList)
+
+```
+
+``` {r Seurat integration Workflow}
+library(SCINA)
+#library(tidyverse)
+# source("seurat_helpers_functions.R")
+
+VlnPlot(ImmuneSeuratObject, features = "nCount_RNA")
+
+
+plot(ImmuneSeuratObject@meta.data$ImmuneCellType1, ImmuneSeuratObject@meta.data$ImmuneCellType2)
+
+
+
+```
+
+``` {r tSNE}
+
+set.seed(33)
+
+ImmuneSeuratObject <- FindVariableFeatures(ImmuneSeuratObject, nfeatures = 2000)
+
+ImmuneSeuratObject <- RunPCA(ImmuneSeuratObject, features = VariableFeatures(ImmuneSeuratObject))
+
+
+
+ImmuneSeuratObject <- RunTSNE(
+  ImmuneSeuratObject, perplexity = 20,
+  dims = 1:15,
+  seed.use = 33
+  )
+
+ImmuneSeuratObject$CellType <- ImmuneCellTypesMatrix$CellType
+
+DimPlot(ImmuneSeuratObject, reduction = "tsne", group.by = "CellType")
+
+```
+
+``` {r UMAPing} 
+
+ImmuneSeuratObject <- RunUMAP(ImmuneSeuratObject, dims = 1:15, n.neighbors = 20)
+Seurat::DimPlot(ImmuneSeuratObject, reduction = "umap", group.by = "CellType")
+
+length(ImmuneSeuratObject$CellType)
+
+
+```
+
+
+
+
+``` {r PseudoTime}
+
+library(monocle3)
+
+library(SeuratWrappers)
+
+
+# Rebuilding new seurat object of just cancerous cells
+mergedTemp <- read.csv("merge_test.csv")
+
+colnames(mergedTemp)[colnames(mergedTemp) == "Run"] <- "CellID"
+
+generalTypes <- read.csv("GeneralCellTypesSRRs.csv")
+
+mergedData <- merge(mergedTemp, generalTypes, by = "CellID")
+
+rownames(mergedData) <- mergedData$CellID
+
+mergedData <- mergedData[colnames(countsDF),]
+
+mergedData$Treatment <- dplyr::recode(
+  mergedData$analysis,
+  "naive" = "TN",
+  "grouped_pr" = "RD",
+  "grouped_pd" = "PD",
+  .default = NA_character_
+)
+
+CountsSeuratObject <- Seurat::AddMetaData(CountsSeuratObject, metadata = mergedData)
+
+CancerousSeuratObject <- subset(CountsSeuratObject, subset = CellType == "Epithelial")
+
+# Umapping
+
+set.seed(33)
+
+CancerousSeuratObject <- FindVariableFeatures(CancerousSeuratObject, nfeatures = 2000)
+
+CancerousSeuratObject <- RunPCA(CancerousSeuratObject, features = VariableFeatures(CancerousSeuratObject))
+
+CancerousSeuratObject <- RunUMAP(CancerousSeuratObject, dims = 1:15)
+Seurat::DimPlot(CancerousSeuratObject, reduction = "umap", group.by = "patient_id")
+Seurat::DimPlot(CancerousSeuratObject, reduction = "umap", group.by = "Treatment")
+
+CancerousSeuratObject$OldSampleName <- CancerousSeuratObject$sample_name
+CancerousSeuratObject$sample_name <- NULL
+
+
+CancerousCellDataSet <- SeuratWrappers::as.cell_data_set(CancerousSeuratObject)
+
+CDS <- CancerousCellDataSet
+
+CDS <- cluster_cells(CDS)
+
+plot_cells(cds = CDS, show_trajectory_graph = FALSE, color_cells_by = "partition")
+
+CDS <- learn_graph(CDS)
+
+CDS <- order_cells(CDS)
+
+plot_cells(CDS, color_cells_by = "pseudotime")
+
+#Spatial Correlation analysis
+graphtestSave <- graph_test(CDS, neighbor_graph = "principal_graph")
+
+
+
+
+
+```
+
+
+``` {}
