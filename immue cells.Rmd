@@ -1,0 +1,316 @@
+---
+title: "Cell Classification and tSNE"
+author: "Shiva Ayyar"
+date: "2025-04-12"
+output: html_document
+---
+
+```{r}
+# Load the two CSV files
+ImmuneCell <- read.csv("ImmuneCellTypesSRRs.csv", row.names = 1)
+
+mergeTest <- read.csv("merge_test.csv")
+colnames(mergeTest)[colnames(mergeTest) == "Run"] <- "CellID"
+
+# Merge by CellID (or another shared column)
+mergedData <- merge(mergeTest, ImmuneCell, by = "CellID")
+head(mergedData)
+```
+
+```{r Build seurat object}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+
+# 1. Load raw count matrix
+countsDF <- read.delim("gene_id.counts", header = FALSE, stringsAsFactors = FALSE)
+
+# 2. Fix column names and trim extra rows
+colnames(countsDF) <- countsDF[2, ]
+countsDF <- countsDF[-c(1,2), ]
+rownames(countsDF) <- countsDF[, 1]
+countsDF <- countsDF[, 7:ncol(countsDF)]
+
+# Clean column names (remove path and suffix)
+colnames(countsDF) <- gsub("/mnt/personal/wilson/star_aligned_65/", "", colnames(countsDF))
+colnames(countsDF) <- gsub("_Aligned.sortedByCoord.out.bam", "", colnames(countsDF))
+
+# 3. Convert to matrix and ensure numeric data
+counts_matrix <- as.matrix(sapply(countsDF, as.numeric))
+rownames(counts_matrix) <- make.unique(rownames(countsDF))  # Ensure unique gene names
+
+# 4. Load and align metadata
+ImmuneCell <- read.csv("ImmuneCellTypesSRRs.csv", row.names = 1)
+mergeTest <- read.csv("merge_test.csv")
+colnames(mergeTest)[colnames(mergeTest) == "Run"] <- "CellID"
+
+mergedData <- merge(mergeTest, ImmuneCell, by = "CellID")
+rownames(mergedData) <- mergedData$CellID
+
+# 5. Subset metadata and matrix to overlapping cells
+shared_cells <- intersect(colnames(counts_matrix), rownames(mergedData))
+counts_matrix <- counts_matrix[, shared_cells]
+mergedData <- mergedData[shared_cells, ]
+
+# 6. Create sparse matrix (Seurat expects dgCMatrix)
+counts_sparse <- Matrix(counts_matrix, sparse = TRUE)
+
+# 7. Create Seurat object
+immune_obj <- CreateSeuratObject(counts = counts_sparse, meta.data = mergedData, project = "ImmuneCells")
+
+# 8. Done
+immune_obj
+```
+
+
+
+```{r build the suerat object}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# 1. Normalize, find variable features, scale
+immune_obj <- NormalizeData(immune_obj)
+immune_obj <- FindVariableFeatures(immune_obj)
+immune_obj <- ScaleData(immune_obj)
+
+# 2. Recode 'analysis' column into 'Treatment'
+immune_obj$Treatment <- dplyr::recode(
+  immune_obj$analysis,
+  "naive" = "TN",
+  "grouped_pr" = "RD",
+  "grouped_pd" = "PD",
+  .default = NA_character_
+)
+
+# 3. Set identity class
+Idents(immune_obj) <- "Treatment"
+```
+```{r immune histogram}
+library(dplyr)
+library(ggplot2)
+
+# Step 1: Summarize counts
+celltype_meta <- immune_obj@meta.data %>%
+  group_by(Treatment, CellType) %>%
+  summarise(Count = n(), .groups = "drop")
+
+# Step 2: Order Treatment (optional)
+celltype_meta$Treatment <- factor(celltype_meta$Treatment, levels = c("TN", "RD", "PD"))
+
+# Step 3: Create faceted bar plot
+facet_plot <- ggplot(celltype_meta, aes(x = Treatment, y = Count, fill = Treatment)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  facet_wrap(~ CellType, scales = "free_y") +  # separate panel per cell type
+  scale_fill_brewer(palette = "Set2") +  # soft, readable colors
+  labs(
+    title = "Immune Cell Composition Across Treatment Stages",
+    x = "Treatment Stage",
+    y = "Cell Count"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+# Step 4: Save
+ggsave("Faceted_CellType_Treatment_Distribution.png",
+       plot = facet_plot,
+       width = 12, height = 8, dpi = 300)
+```
+
+```{r, immunecell composition across time points}
+library(dplyr)
+library(ggplot2)
+
+# Filter out NA CellTypes and summarize
+celltype_meta <- immune_obj@meta.data %>%
+  filter(!is.na(CellType)) %>%  # ⛔️ remove NA
+  group_by(Treatment, CellType) %>%
+  summarise(Count = n(), .groups = "drop")
+
+# Ensure consistent Treatment order
+celltype_meta$Treatment <- factor(celltype_meta$Treatment, levels = c("TN", "RD", "PD"))
+
+# Define consistent colors per cell type
+celltype_colors <- c(
+  "Bcell"        = "#1f77b4",
+  "Bcell_Mem"    = "#ff7f0e",
+  "Bcell_PB"     = "#2ca02c",
+  "Dendritic"    = "#d62728",
+  "Macrophage"   = "#9467bd",
+  "Mast"         = "#8c564b",
+  "Neutrophils"  = "#e377c2",
+  "pDCs"         = "#7f7f7f",
+  "Tcell"        = "#17becf"
+)
+
+# Plot: 1 row of subplots, consistent color per cell type
+facet_plot_horizontal <- ggplot(celltype_meta, aes(x = Treatment, y = Count, fill = CellType)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  facet_wrap(~ CellType, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = celltype_colors) +
+  labs(
+    title = "Immune Cell Distribution Across Treatment Stages",
+    x = "Treatment Stage",
+    y = "Cell Count"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+# Save plot
+ggsave("Faceted_Horizontal_OneColorPerCellType_NoNA.png",
+       plot = facet_plot_horizontal,
+       width = 16, height = 4, dpi = 300)
+```
+
+
+```{r tcell, pathway analysis}
+## GSEA enrichment for T cells (TN vs PD)
+library(clusterProfiler)
+library(msigdbr)
+library(dplyr)
+library(ggplot2)
+
+# 1. Load Hallmark gene sets
+hallmark_df <- msigdbr(species = "Homo sapiens", category = "H") %>%
+  dplyr::select(gs_name, gene_symbol)
+
+# 2. Prepare ranked gene list
+gene_ranks <- de_annotated$avg_log2FC
+names(gene_ranks) <- de_annotated$SYMBOL
+gene_ranks <- sort(gene_ranks[!duplicated(names(gene_ranks)) & !is.na(gene_ranks)], decreasing = TRUE)
+
+# 3. Run GSEA
+gsea_tcell <- GSEA(
+  geneList     = gene_ranks,
+  TERM2GENE    = hallmark_df,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE
+)
+
+# 4. Visualize top pathways
+dotplot(gsea_tcell, showCategory = 20) +
+  ggtitle("Hallmark GSEA: T Cells (TN vs RD)") +
+  theme_minimal(base_size = 12)
+
+# 5. Save plot
+ggsave("GSEA_dotplot_Tcell_TN_vs_RD.png", width = 8, height = 6, dpi = 300)
+
+# 6. Save full GSEA results
+gsea_results_tcell <- as.data.frame(gsea_tcell)
+write.csv(gsea_results_tcell, "GSEA_results_Tcell_TN_vs_RD.csv", row.names = FALSE)
+
+# 7. Preview top enriched pathways
+head(gsea_results_tcell[, c("ID", "Description", "NES", "pvalue", "p.adjust")], 10)
+```
+
+```{r macrophage, Differnetial Expression + Volcano plot}
+# Ensure correct identity and cell filtering
+Idents(immune_obj) <- immune_obj$Treatment
+
+# Subset only T cells
+macro_obj <- subset(immune_obj, subset = CellType == "Macrophage")
+
+# Set treatment as identity for DE test
+Idents(macro_obj) <- macro_obj$Treatment
+
+# Perform DE analysis: TN vs PD (within T cells only)
+de_m_tn_vs_pd <- FindMarkers(macro_obj,
+                                 ident.1 = "TN",
+                                 ident.2 = "PD",
+                                 test.use = "wilcox",
+                                 latent.vars = "sample_name", # optional depending on your metadata
+                                 logfc.threshold = 0.1,
+                                 min.pct = 0.05)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+ensg_ids <- rownames(de_m_tn_vs_pd)
+
+# Convert Ensembl → Gene Symbol
+gene_map <- bitr(ensg_ids,
+                 fromType = "ENSEMBL",
+                 toType = "SYMBOL",
+                 OrgDb = org.Hs.eg.db)
+
+# Add ENSG IDs as a column for merging
+de_m_tn_vs_pd$ENSEMBL <- rownames(de_m_tn_vs_pd)
+
+# Merge to add SYMBOL column
+de_m_annotated <- merge(de_m_tn_vs_pd, gene_map, by = "ENSEMBL")
+
+head(de_m_annotated[order(de_m_annotated$p_val_adj), c("ENSEMBL", "SYMBOL", "avg_log2FC", "p_val_adj")], 10)
+head(de_m_annotated[order(de_m_annotated$p_val_adj), ], 10)
+# Save results
+#write.csv(de_m_tn_vs_pd, file = "Macro_DE_RD_vs_PD.csv")
+```
+
+
+```{r macrophage, pathway analysis}
+## GSEA enrichment for Macrophages (TN vs RD)
+library(clusterProfiler)
+library(msigdbr)
+library(dplyr)
+library(ggplot2)
+
+# 1. Load Hallmark gene sets
+hallmark_df <- msigdbr(species = "Homo sapiens", category = "H") %>%
+  dplyr::select(gs_name, gene_symbol)
+
+# 2. Prepare ranked gene list
+gene_ranks <- de_m_annotated$avg_log2FC
+names(gene_ranks) <- de_m_annotated$SYMBOL
+gene_ranks <- sort(gene_ranks[!duplicated(names(gene_ranks)) & !is.na(gene_ranks)], decreasing = TRUE)
+
+# 3. Run GSEA
+gsea_macro <- GSEA(
+  geneList     = gene_ranks,
+  TERM2GENE    = hallmark_df,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE
+)
+
+# 4. Visualize top pathways
+dotplot(gsea_macro, showCategory = 20) +
+  ggtitle("Hallmark GSEA: Macrophages (TN vs PD)") +
+  theme_minimal(base_size = 12)
+
+# 5. Save plot
+ggsave("GSEA_dotplot_Macrophage_RD_vs_PD.png", width = 8, height = 6, dpi = 300)
+
+# 6. Save full GSEA results
+gsea_results_macro <- as.data.frame(gsea_macro)
+#write.csv(gsea_results_macro, "GSEA_results_Macrophage_RD_vs_PD.csv", row.names = FALSE)
+
+# 7. Preview top enriched pathways
+head(gsea_results_macro[, c("ID", "Description", "NES", "pvalue", "p.adjust")], 10)
+```
+
+
+```{r}
+de_df <- read.csv("/Users/wilson/Documents/Grad/PhD/CWRU/sybb/SYBB412/final project/final_project/immun_tcell/Tcell_DE_TN_vs_RD.csv", row.names = 1)
+de_df$ENSEMBL <- rownames(de_df)
+
+gene_map <- bitr(de_df$ENSEMBL,
+                 fromType = "ENSEMBL",
+                 toType = "SYMBOL",
+                 OrgDb = org.Hs.eg.db)
+
+de_annotated <- merge(de_df, gene_map, by = "ENSEMBL")
+
+sig_genes <- de_annotated %>%
+  filter(p_val_adj < 0.05 & abs(avg_log2FC) > 0.25)
+
+head(sig_genes[, c("SYMBOL", "avg_log2FC", "p_val_adj")])
+
+write.csv(sig_genes, "tcell_DE_TN_vs_RD_significant_annotated.csv", row.names = FALSE)
+```
+
+
+
